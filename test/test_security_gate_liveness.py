@@ -586,7 +586,10 @@ def _url_payload_command(n: int) -> str:
 #: is still withheld when the account is a zero-padded 6-10 digit bot id
 #: (``_BOT_ID_LENGTHS``). Four constants, one predicate, its call in the rejection arm,
 #: their comments and their manifest lines; the exemption only narrows.
-_PACKAGE_LINE_BUDGET = 32_899
+#: Set to the measured 33,086: main's tree measures 32,909, plus 177 for the ``rm`` floor reading each nested-shell payload
+#: through the shared reader, and ``shell_commands.redirect_hidden_payloads``: a redirect
+#: before the ``-c`` operand hides no payload. Deny-only: no allow widened.
+_PACKAGE_LINE_BUDGET = 33_086
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
