@@ -155,6 +155,15 @@ _PERMANENT_EXCEPTIONS = {
     ("fork-pr-description.yml", "describe"),
     ("fork-workflow-guard.yml", "guard"),
     ("fork-workflow-guard.yml", "strip-stale-override"),
+    # Scheduled lanes whose schedule event carries no live collaborator actor for
+    # the AWS webhook allowlist to check, so a fleet dispatch would queue until it
+    # was rejected. Neither fires on a pull request or declares merge_group.
+    ("merge-queue-ruleset.yml", "check"),
+    ("playwright-cli-banner.yml", "check"),
+    # Dispatch-only, and never fleet-routed. The allowlist reason above does not
+    # apply: a workflow_dispatch does carry an actor, which is why pages.yml can
+    # route one to the fleet through the same actor predicate.
+    ("test-durations.yml", "refresh"),
 }
 
 # A permanent exception stays OFF the CodeBuild fleet; it does not have to stay
@@ -176,6 +185,17 @@ _HOSTED_EXCEPTION_RUNNERS: dict[tuple[str, str], object] = {
     ("fork-pr-description.yml", "describe"): {"group": "kirocrew-runners"},
     ("fork-workflow-guard.yml", "guard"): {"group": "kirocrew-runners"},
     ("fork-workflow-guard.yml", "strip-stale-override"): {"group": "kirocrew-runners"},
+    ("ci-runner-watchdog.yml", "watchdog"): {"group": "kirocrew-runners"},
+    ("memory-benchmark.yml", "accept"): {"group": "kirocrew-runners"},
+    ("merge-queue-ruleset.yml", "check"): {"group": "kirocrew-runners"},
+    ("add-contributor.yml", "add"): {"group": "kirocrew-runners"},
+    ("connections-l0.yml", "probe"): {"group": "kirocrew-runners"},
+    ("deferred-findings-audit.yml", "audit"): {"group": "kirocrew-runners"},
+    ("fix-loop-analysis.yml", "metrics"): {"group": "kirocrew-runners"},
+    ("fix-loop-analysis.yml", "analyze"): {"group": "kirocrew-runners"},
+    ("playwright-cli-banner.yml", "check"): {"group": "kirocrew-runners"},
+    ("ship-report.yml", "report"): {"group": "kirocrew-runners"},
+    ("test-durations.yml", "refresh"): {"group": "kirocrew-runners"},
 }
 _DEFAULT_HOSTED_EXCEPTION_RUNNER = "ubuntu-latest"
 
