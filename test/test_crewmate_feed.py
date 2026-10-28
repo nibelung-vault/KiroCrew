@@ -514,6 +514,65 @@ def test_a_growth_after_teardown_still_finds_its_thread(appended, monkeypatch):
     assert [i["text"] for i in data["items"]] == ["Open a PR for the docs fix?"]
 
 
+def test_a_burst_of_growth_scans_the_slots_once_per_session_per_window(monkeypatch):
+    """A busy session grows per drained batch; only its first growth in a window walks the slots."""
+    slot = _Slot([])
+    state = _State(slot)
+    monkeypatch.setattr(crewmate_feed, "_state", lambda: state)
+    monkeypatch.setattr(crewmate_feed, "_session_of", lambda _slot: "s-atlas")
+    scans: list[int] = []
+    real = crewmate_feed._crewmate_slots
+
+    def counted(st: Any) -> list[Any]:
+        scans.append(1)
+        return real(st)
+
+    monkeypatch.setattr(crewmate_feed, "_crewmate_slots", counted)
+
+    async def go() -> None:
+        for _ in range(5):
+            crewmate_feed._grew("s-busy")
+        assert len(scans) == 1
+        crewmate_feed._grew("s-atlas")  # another session in the same window
+        assert len(scans) == 2
+        crewmate_feed._timer.cancel()
+        crewmate_feed._timer = None
+        crewmate_feed._pending.clear()  # the settle took the window
+        crewmate_feed._grew("s-busy")  # next window
+        assert len(scans) == 3
+        crewmate_feed._timer.cancel()
+        crewmate_feed._timer = None
+
+    asyncio.run(go())
+    assert crewmate_feed._sessions[SLOT] == "s-atlas"
+
+
+def test_a_crewmate_on_a_new_session_mid_window_is_learned_before_teardown(appended, monkeypatch):
+    """The deduplicated scan must not miss a thread whose session changed in the window."""
+    _cards(monkeypatch, [])
+    live = {"sid": "s-old"}
+    monkeypatch.setattr(crewmate_feed, "_session_of", lambda _slot: live["sid"])
+    slot = _Slot([{"role": "assistant", "content": ASK, "ts": "2026-10-18T18:40:00+00:00"}])
+    state = _State(slot)
+    monkeypatch.setattr(crewmate_feed, "_state", lambda: state)
+
+    async def go() -> None:
+        crewmate_feed._grew("s-old")
+        live["sid"] = "s-new"  # the thread was reset onto a new session
+        crewmate_feed._grew("s-old")  # deduplicated: no scan
+        crewmate_feed._grew("s-new")  # a new id in this window: scans
+        live["sid"] = ""  # turn teardown
+        crewmate_feed._timer.cancel()
+        crewmate_feed._timer = None
+        crewmate_feed._settle()
+        await _drain()
+
+    asyncio.run(go())
+    assert crewmate_feed._sessions[SLOT] == "s-new"
+    ((kind, sid, _data),) = [e for e in appended if e[0] == "waiting"]
+    assert sid == "s-new"
+
+
 def test_a_goal_of_wide_characters_still_fits_one_log_line():
     from kiro_crew.crew_log import emit_text
     from kiro_crew.crew_log.emit_state import _SRC_GATEWAY

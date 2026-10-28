@@ -285,3 +285,20 @@ class TestAppTokenIsolation:
         resp = await _get("s1", {"s1": slot}, app="")
         assert resp.status == 200
         assert json.loads(resp.text)["total"] == 8
+
+
+def test_the_one_pass_budget_answers_like_splitting_the_whole_list():
+    """The budget stops early but must keep the split-then-slice answer exactly."""
+    import itertools
+
+    from kiro_crew.dashboard.state_parts import source_links as sl
+
+    def split_then_slice(links: list[dict]) -> list[dict]:
+        changes, issues = sl._source_links_by_kind(links)
+        return (changes + issues)[: sl._SERIALIZED_SOURCE_LINKS_PER_SLOT]
+
+    shapes = [{"kind": "change"}, {"kind": "issue"}, {}, {"kind": "other"}]
+    for n in range(7):
+        for combo in itertools.product(range(len(shapes)), repeat=n):
+            links = [{**shapes[i], "url": f"u{j}"} for j, i in enumerate(combo)]
+            assert sl._budgeted_source_links(links) == split_then_slice(links)

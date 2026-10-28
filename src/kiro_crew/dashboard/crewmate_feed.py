@@ -285,9 +285,16 @@ def _on_log_growth(session_id: str) -> None:
 
 def _grew(session_id: str) -> None:
     global _timer
+    # The writer reports growth once per drained batch, so a busy session grows
+    # many times inside one settle window, and each scan walks every open slot.
+    # Learning is needed once per session per window: a crewmate's sid is read
+    # from its live client, which a later growth of the same session reads alike,
+    # and a crewmate that moves to a NEW session grows under that new id, which
+    # is not pending yet and so scans.
+    first = session_id not in _pending
     _pending.add(session_id)
     state = _state()
-    if state is not None:
+    if state is not None and first:
         # Learn which thread this session is now, before a teardown can clear it.
         for slot in _crewmate_slots(state):
             _sid(slot)

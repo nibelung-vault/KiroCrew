@@ -84,9 +84,25 @@ def _budgeted_source_links(links: list[dict]) -> list[dict]:
     check-status refresh honest too -- it reads this same slice, so every PR
     chip the card renders is also the one whose CI status gets scheduled, and a
     mentioned issue can never push a PR out of either.
+
+    One pass that stops once the budget is full of pull requests: it runs three
+    times per slot on every slots frame (the bare summary and each audience
+    re-projection), over a cached list of up to ``_MAX_SOURCE_LINKS_PER_SLOT``
+    links, and splitting the whole list paid two full scans each time for a
+    three-link answer. The answer is ``(changes + issues)[:budget]`` exactly.
     """
-    changes, issues = _source_links_by_kind(links)
-    return (changes + issues)[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
+    budget = _SERIALIZED_SOURCE_LINKS_PER_SLOT
+    changes: list[dict] = []
+    issues: list[dict] = []
+    for link in links:
+        kind = link.get("kind", "change")
+        if kind == "change":
+            changes.append(link)
+            if len(changes) >= budget:
+                return changes
+        elif kind == "issue" and len(issues) < budget:
+            issues.append(link)
+    return (changes + issues)[:budget]
 
 
 def _source_links_by_kind(links: list[dict]) -> tuple[list[dict], list[dict]]:
