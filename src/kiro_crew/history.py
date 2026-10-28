@@ -451,6 +451,16 @@ class ConversationLog:
         self._title_scan_cache: _LRUCache[tuple[tuple[tuple[int, int, int], int], int, object]] = (
             _LRUCache(_METADATA_CACHE_MAX)
         )
+        #: ``((identity, size), gen, has_messages)`` for :meth:`has_messages`.
+        #: The Older Sessions listing asks it of every untitled transcript on
+        #: each refresh, and each uncached answer takes the transcript lock and
+        #: parses the file. Same stamp, generation guard and bound as
+        #: ``_title_scan_cache``: the answer only changes when the file does,
+        #: and a metadata-only write that restores the mtime still moves the
+        #: size or ctime in the stamp.
+        self._has_messages_cache: _LRUCache[tuple[tuple[CacheIdentity, int], int, bool]] = (
+            _LRUCache(_METADATA_CACHE_MAX)
+        )
         #: Bounded identity-keyed LRU of formatted ``recent()`` windows keyed by
         #: (key, max_messages, roles). The tail-read fast path intentionally
         #: never warms ``_msg_cache`` (it returns a partial view), so a session
@@ -625,10 +635,34 @@ class ConversationLog:
         cannot be delivered intact or is not valid JSON counts as content --
         unverifiable history is still history. The forgiving tail readers are
         not used here for that reason.
+
+        An answer is memoized against the file's stamp and this log's write
+        generation, so a transcript that has not changed since the last call is
+        answered from one ``stat`` without the lock or a parse.
         """
+        path = self._path(key)
+        # Generation BEFORE the stat, as in list_sessions: a write landing
+        # between them bumps it and the publish below discards itself.
+        gen = self._cache_gen(key)
+        try:
+            st = os.stat(path)
+        except OSError:
+            # Absent or unstattable: the locked read decides, uncached.
+            return self._read_has_messages(key, path)
+        stamp = (self._cache_identity(st), st.st_size)
+        cached = self._has_messages_cache.get(key)
+        if cached is not None and cached[0] == stamp and cached[1] == self._cache_gen(key):
+            return cached[2]
+        result = self._read_has_messages(key, path)
+        self._publish_if_current(
+            self._has_messages_cache, key, (stamp, gen, result), key=key, gen=gen
+        )
+        return result
+
+    def _read_has_messages(self, key: str, path: Path) -> bool:
+        """The uncached :meth:`has_messages` read, under the transcript lock."""
         from kiro_crew.jsonl_util import UnreadableRecord, strict_records
 
-        path = self._path(key)
         with self._locked(key):
             try:
                 handle = open(path, "rb")
