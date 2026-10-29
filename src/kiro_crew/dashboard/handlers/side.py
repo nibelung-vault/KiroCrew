@@ -59,6 +59,8 @@ from kiro_crew.llm_helpers import (
 )
 from kiro_crew.security import StreamRedactor, redact
 from kiro_crew.sel import sel
+from kiro_crew.shared_crew.admission_gate import actor_budget
+from kiro_crew.shared_crew.turn_gate import capacity_note, initiated_by, run_admitted
 from kiro_crew.start_priority import StartPriority
 
 logger = logging.getLogger(__name__)
@@ -116,14 +118,37 @@ def _dispatch_side_turn(
         message_id=message_id,
     )
 
-    task = asyncio.create_task(
-        _run_side_turn(
+    def _refused(reason: object) -> None:
+        # The turn never ran: settle the sidecar as its own ``finally`` would.
+        if side.last_run_id == run_id:
+            side.is_complete = True
+            if side.task is task:
+                side.task = None
+        broadcast_side_result(
             state,
-            slot,
-            run_id,
-            question,
-            is_first_turn=is_first_turn,
-            start_priority=start_priority,
+            slot_key=slot.key,
+            run_id=run_id,
+            role="assistant",
+            content=capacity_note(reason),
+            is_error=True,
+            final=True,
+        )
+
+    # Shared Crew fair admission, charged to the asker (``initiated_by`` at the
+    # handler); a queued question drained later runs as the bounded Unknown.
+    task = asyncio.create_task(
+        run_admitted(
+            _run_side_turn(
+                state,
+                slot,
+                run_id,
+                question,
+                is_first_turn=is_first_turn,
+                start_priority=start_priority,
+            ),
+            session_key=_side_session_key(slot.key),
+            text=question,
+            refused=_refused,
         )
     )
     # Store the handle on the sidecar so ``api_side_stop`` can cancel this turn
@@ -225,7 +250,10 @@ def _drain_side_queue(state: DashboardState, slot, run_id: str) -> None:
         depth=len(side.queue),
     )
     try:
-        _dispatch_side_turn(state, slot, entry["content"])
+        from kiro_crew.shared_crew.turn_gate import independent_turn
+
+        with independent_turn():
+            _dispatch_side_turn(state, slot, entry["content"])
     except Exception:
         # The card is already retired on the client, so put the text back at the
         # head rather than only reporting the failure: "a submit is never
@@ -1348,9 +1376,10 @@ async def api_side_turn(request: web.Request) -> web.Response:
 
     # The owner asking is waiting on the panel; an app token is not. A queued
     # question drains BACKGROUND, onto the side session the turn before it warmed.
-    run_id = _dispatch_side_turn(
-        state, slot, question, start_priority=owner_start_priority(request)
-    )
+    with initiated_by(actor_budget(request)):
+        run_id = _dispatch_side_turn(
+            state, slot, question, start_priority=owner_start_priority(request)
+        )
 
     sel().log_api_access(
         caller=request.get("app", "") or "dashboard",
