@@ -1205,6 +1205,10 @@ export function useComposerVoice(host: ComposerVoiceHost) {
     micBusyElsewhereSession,
     /** True for a moment after a HELD transcript landed in this composer. */
     heldLanded,
+    /** Whether this composer owns the push-to-talk key: the same flag that
+     *  arms `usePushToTalk` above, so a control names the key only where the
+     *  key dictates into it. */
+    ownsPushToTalk: voiceInputSupported && !!host.pushToTalk,
     /** `VoiceDisabledModal` state; the host renders the modal and routes its settings link. */
     setup: {
       open: voiceSetupOpen,
@@ -1262,6 +1266,8 @@ export function composerVoiceInputProps(cv: ComposerVoice) {
     voiceBusyElsewhereSession: cv.micBusyElsewhereSession,
     /* A held dictation just landed here: the composer shows a brief cue. */
     voiceHeldLanded: cv.heldLanded,
+    /* This composer owns the push-to-talk key, so its mic may name the key. */
+    voiceOwnsPttKey: cv.ownsPushToTalk,
     // The capture's own error wins: a microphone that never recorded outranks a
     // cleanup pass that did not run.
     voiceError: voice.error ?? polishError,
