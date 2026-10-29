@@ -19,6 +19,10 @@ from kiro_crew.hook_runtime.script_hooks import ScriptHookResult
 
 pytestmark = pytest.mark.usefixtures("healthy_host_memory")
 
+# The child's Stop hooks fire through the same ``hook_store.fire`` after the stream,
+# so every assertion here filters to the two events fired before the prompt.
+_PROMPT_EVENTS = ("AgentSpawn", "UserPromptSubmit")
+
 
 def _out(event: str, stdout: str, exit_code: int = 0) -> list[ScriptHookResult]:
     return [
@@ -33,7 +37,8 @@ async def _run_child(
 ):
     """Run one child and return (the prompts it was sent, the hook fire calls in order).
 
-    *on_fire*, when given, is called with (manager, info) inside every hook fire."""
+    *on_fire*, when given, is called with (manager, info) inside every AgentSpawn and
+    UserPromptSubmit fire; the Stop fire after the stream does not call it."""
     from kiro_crew.subagent import SubagentInfo, SubagentManager
 
     prompts: list[str] = []
@@ -56,7 +61,7 @@ async def _run_child(
     manager = SubagentManager(sessions=sessions, ctx_builder=ctx)
 
     async def _fire(event, *_a, **_kw):  # type: ignore[no-untyped-def]
-        if on_fire is not None:
+        if on_fire is not None and event in _PROMPT_EVENTS:
             on_fire(manager, info)
         return results.get(event, [])
 
@@ -72,11 +77,7 @@ async def _run_child(
     manager._log_spawned(info)
     with patch("kiro_crew.subagent.Stats"), patch("kiro_crew.subagent.sel"):
         await manager._run_inner(info, "subagent:s01")
-    calls = [
-        c
-        for c in manager.hook_store.fire.await_args_list
-        if c.args[0] in ("AgentSpawn", "UserPromptSubmit")
-    ]
+    calls = [c for c in manager.hook_store.fire.await_args_list if c.args[0] in _PROMPT_EVENTS]
     return prompts, calls
 
 
