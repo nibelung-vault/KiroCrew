@@ -95,6 +95,8 @@ import { openCrewSession } from '../pages/chat/command-center/CrewWorkerList'
 // same reason the app does. (The miss degrades safely to the surface-free
 // sentence, which is what the unregistered-surface case below asserts.)
 import '../surfaces/builtins'
+import { crewModePreviewOn } from './crewModePreview'
+import { PREVIEW_CREW_MODE } from '../utils/previewFlags'
 
 type Slot = {
   messages: Msg[]; mode?: string; agent?: string; agentKind?: string; origin?: string; memoryMode?: string; slotKeys?: string[]
@@ -103,6 +105,8 @@ type Slot = {
   instanceId?: string
   /** The Crew Mode root this slot is a worker of. */
   crewRoot?: string
+  /** The server's `crew_mode_root` stamp on this slot. */
+  crewModeRootStamp?: boolean
   slotRunning?: boolean
   /** The listed slot's `running`, which follows the server. */
   listedRunning?: boolean
@@ -114,14 +118,14 @@ type Slot = {
   connected?: boolean
 }
 
-function makeStore({ messages, mode = '', agent = 'default', agentKind = '', origin = 'user', memoryMode = 'persistent', slotKeys = ['slot-a'], createdBy, instanceId, crewRoot, slotRunning = false, listedRunning = false, slotLoading = false, activityOpen = false, pendingApproval = false, connected = false }: Slot) {
+function makeStore({ messages, mode = '', agent = 'default', agentKind = '', origin = 'user', memoryMode = 'persistent', slotKeys = ['slot-a'], createdBy, instanceId, crewRoot, crewModeRootStamp, slotRunning = false, listedRunning = false, slotLoading = false, activityOpen = false, pendingApproval = false, connected = false }: Slot) {
   return configureStore({
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
     preloadedState: {
       dashboard: {
         status: null,
         ...(connected ? { connected: true } : {}),
-        slots: slotKeys.map(key => ({ key, messages: key === 'slot-a' ? messages.length : 0, running: key === 'slot-a' && listedRunning, mode: key === 'slot-a' ? mode : '', agent: key === 'slot-a' ? agent : 'default', agent_kind: key === 'slot-a' ? agentKind : '', origin: key === 'slot-a' ? origin : 'user', memory_mode: key === 'slot-a' ? memoryMode : 'persistent', ...(key === 'slot-a' && createdBy ? { created_by: createdBy } : {}), ...(key === 'slot-a' && instanceId ? { instance_id: instanceId } : {}), ...(key === 'slot-a' && crewRoot ? { crew_root: crewRoot, title: 'Worker B' } : {}), ...(key === 'root-1' ? { title: 'Sample goal', crew_mode_root: true } : {}), pending_approval: key === 'slot-a' && pendingApproval, waiting_for_input: false, last_activity_ts: undefined })),
+        slots: slotKeys.map(key => ({ key, messages: key === 'slot-a' ? messages.length : 0, running: key === 'slot-a' && listedRunning, mode: key === 'slot-a' ? mode : '', agent: key === 'slot-a' ? agent : 'default', agent_kind: key === 'slot-a' ? agentKind : '', origin: key === 'slot-a' ? origin : 'user', memory_mode: key === 'slot-a' ? memoryMode : 'persistent', ...(key === 'slot-a' && createdBy ? { created_by: createdBy } : {}), ...(key === 'slot-a' && instanceId ? { instance_id: instanceId } : {}), ...(key === 'slot-a' && crewRoot ? { crew_root: crewRoot, title: 'Worker B' } : {}), ...(key === 'slot-a' && crewModeRootStamp ? { crew_mode_root: true } : {}), ...(key === 'root-1' ? { title: 'Sample goal', crew_mode_root: true } : {}), pending_approval: key === 'slot-a' && pendingApproval, waiting_for_input: false, last_activity_ts: undefined })),
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
       } as unknown as RootState['dashboard'],
@@ -631,3 +635,46 @@ describe('Crew Mode on ChatPage', () => {
     expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
   })
 })
+
+describe('ChatPage with the Crew Mode preview off', () => {
+  // The gateway still runs Crew Mode; the device has the preview off.
+  beforeEach(() => {
+    setCrewModeCatalog('kirocrew-conductor', ['kirocrew-conductor'])
+    localStorage.removeItem(PREVIEW_CREW_MODE)
+  })
+  afterEach(() => { localStorage.clear(); setCrewModeCatalog(undefined, undefined) })
+
+  it('offers no Crew Mode chip and no Crew Mode welcome on a new chat', async () => {
+    await renderWith({ messages: [] })
+    expect(screen.getByTestId('memory-mode-chip')).toBeInTheDocument()
+    expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
+    expect(screen.queryByTestId('crew-mode-welcome')).toBeNull()
+  })
+
+  it('shows a Crew Mode root with no Crew Mode mark and no agent switch, since the gateway keeps it on its conductor', async () => {
+    await renderWith({ messages: [{ role: 'user', content: 'hello' }], agent: 'kirocrew-conductor', agentKind: 'template', crewModeRootStamp: true })
+    expect(screen.queryByTestId('crew-mode-composer-chip')).toBeNull()
+    // The gateway refuses every switch of a root (`crew_mode_locked`), so none is offered.
+    expect(screen.queryByRole('button', { name: /^Agent: / })).toBeNull()
+  })
+
+  it('keeps the agent picker on a conductor chat with a message that is no Crew Mode root (Incognito)', async () => {
+    await renderWith({ messages: [{ role: 'user', content: 'hello' }], agent: 'kirocrew-conductor', agentKind: 'template', memoryMode: 'incognito' })
+    expect(screen.queryByRole('button', { name: /^Agent: kirocrew-conductor/ })).toBeInTheDocument()
+  })
+
+  it('still offers the agent picker on a conductor chat with no message yet', async () => {
+    await renderWith({ messages: [], agent: 'kirocrew-conductor', agentKind: 'template' })
+    expect(screen.queryByTestId('crew-mode-composer-chip')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Agent: kirocrew-conductor/ })).toBeInTheDocument()
+  })
+
+  it('opens a crew member as an ordinary chat: no breadcrumb, no steer composer', async () => {
+    await renderWith({ messages: [{ role: 'user', content: 'do part 2' }], agent: 'kirocrew-worker', agentKind: 'template', createdBy: 'root-1', crewRoot: 'root-1', slotKeys: ['slot-a', 'root-1'] })
+    expect(screen.queryByTestId('crew-worker-header')).toBeNull()
+    expect(screen.queryByTestId('crew-steer-composer')).toBeNull()
+  })
+})
+
+// Last, after the file's own hooks that clear localStorage: Crew Mode is a feature preview.
+crewModePreviewOn()
