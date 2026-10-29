@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -386,6 +387,33 @@ async def _probe(
             candidate_runnable = bool(first_candidate) and await asyncio.to_thread(
                 _is_runnable_executable, first_candidate, self._platform
             )
+            unsandboxed_whoami: ProcessResult | None = None
+            if sandbox_failure is not None and await _may_probe_login_unsandboxed(
+                candidate_runnable
+            ):
+                # Enterprise only: the login verdict the boot check and the
+                # login gate read may come from the fixed unsandboxed probe
+                # (_probe_login_unsandboxed). Readiness still reports the
+                # sandbox as unavailable.
+                (
+                    unsandboxed_version,
+                    unsandboxed_whoami,
+                ) = await self._probe_login_unsandboxed(
+                    # ``abspath``, not ``realpath``: anchors a relative
+                    # ``KIROCREW_KIRO_BIN`` and keeps a multiplexer's symlink.
+                    os.path.abspath(first_candidate),
+                    sandbox_failure,
+                )
+                # No setup-complete marker here: no session can start on this
+                # host, and a later sandboxed probe writes it when one can.
+                if unsandboxed_whoami is not None:
+                    if login_only:
+                        self._viable_binary = first_candidate
+                        return _latch_login_only(self, unsandboxed_whoami, probe_identity)
+                elif login_only and unsandboxed_version.timed_out:
+                    # The boot check names the unsandboxed probe's timeout. Any
+                    # other failure keeps the sandbox refusal as the reason.
+                    version_probe, sandbox_failure = unsandboxed_version, None
             if sandbox_failure is not None and candidate_runnable:
                 kind, detail, remedy = sandbox_failure
                 logger.warning(
@@ -402,8 +430,9 @@ async def _probe(
                     # failed, and it failed for an unrelated reason.
                     installed=True,
                     # Unknown, not false: whoami also runs through the probe
-                    # path, so we cannot claim either way.
-                    authenticated=False,
+                    # path, so we cannot claim either way -- unless the
+                    # enterprise unsandboxed whoami above answered signed in.
+                    authenticated=bool(unsandboxed_whoami and unsandboxed_whoami.ok),
                     ready=False,
                     repair_required=False,
                     initial_setup_complete=self._initial_setup_complete,
@@ -844,6 +873,24 @@ async def _run_auth_command(
         await asyncio.to_thread(shutil.rmtree, str(workspace.root), ignore_errors=True)
 
 
+async def _identity_probe_base_env(self: KiroPrerequisiteService) -> dict[str, str]:
+    """The allowlisted environment ``whoami`` runs with."""
+    base_env = _identity_probe_env(self._environ, self._probe_environment)
+    if not base_env.get(CRED_KIRO_API_KEY):
+        # Post-scrub Docker: the entrypoint moved the CLI's own credential
+        # from the process environ into the data home's .env (mode 600), so
+        # the environ allowlist above found nothing. Read it back from the
+        # file — otherwise an API-key container reads as "Not logged in"
+        # while ACP sessions (which get the same re-injection at spawn)
+        # authenticate fine. Off-loop: file read.
+        fallback_key = await asyncio.to_thread(
+            read_env_file_credential, CRED_KIRO_API_KEY, self._data_home / ".env"
+        )
+        if fallback_key:
+            base_env[CRED_KIRO_API_KEY] = fallback_key
+    return base_env
+
+
 async def _audited_identity_probe(
     self: KiroPrerequisiteService, executable: str, *, isolate_home: bool = True
 ) -> ProcessResult:
@@ -866,19 +913,7 @@ async def _audited_identity_probe(
         caller="gateway-status",
         critical=True,
     )
-    base_env = _identity_probe_env(self._environ, self._probe_environment)
-    if not base_env.get(CRED_KIRO_API_KEY):
-        # Post-scrub Docker: the entrypoint moved the CLI's own credential
-        # from the process environ into the data home's .env (mode 600), so
-        # the environ allowlist above found nothing. Read it back from the
-        # file — otherwise an API-key container reads as "Not logged in"
-        # while ACP sessions (which get the same re-injection at spawn)
-        # authenticate fine. Off-loop: file read.
-        fallback_key = await asyncio.to_thread(
-            read_env_file_credential, CRED_KIRO_API_KEY, self._data_home / ".env"
-        )
-        if fallback_key:
-            base_env[CRED_KIRO_API_KEY] = fallback_key
+    base_env = await _identity_probe_base_env(self)
     try:
         result = await self._run_auth_command(
             executable,
@@ -935,3 +970,129 @@ async def _set_terminal_audit(
         )
     except Exception:
         logger.warning("Could not write terminal Kiro setup audit event", exc_info=True)
+
+
+#: The SEL ``caller`` of every probe :func:`_probe_login_unsandboxed` runs.
+_UNSANDBOXED_CALLER = "gateway-status-unsandboxed"
+
+
+async def _may_probe_login_unsandboxed(candidate_runnable: bool) -> bool:
+    """Whether a sandboxed probe the sandbox refused may re-run unsandboxed.
+
+    Enterprise builds only; ``oss`` keeps its sandbox-only probe unchanged. A
+    governed ``sandbox.min_level`` that requires isolation forbids it, as it
+    forbids every other unsandboxed spawn in ``wrap_argv``; a floor that cannot
+    be read forbids it too.
+    """
+    from kiro_crew import edition
+
+    if not candidate_runnable or not edition.is_enterprise():
+        return False
+
+    def _floor_forbids() -> bool:
+        from kiro_crew import sandbox
+
+        return sandbox._floor_mandates_sandbox(sandbox._governance_sandbox_floor())
+
+    try:
+        return not await asyncio.to_thread(_floor_forbids)
+    except Exception:
+        logger.warning("Sandbox floor unreadable; the login check stays sandboxed", exc_info=True)
+        return False
+
+
+async def _probe_login_unsandboxed(
+    self: KiroPrerequisiteService,
+    executable: str,
+    sandbox_failure: tuple[str, str, str],
+) -> tuple[ProcessResult, ProcessResult | None]:
+    """Run ``--version`` then ``whoami`` WITHOUT the sandbox, for the login verdict.
+
+    The enterprise boot check and the login gate's watch read ``authenticated``
+    from the latch this feeds; readiness still reports the sandbox unavailable,
+    so no session starts and the spec and ``acp`` checks stay sandboxed. Each
+    probe writes paired SEL events under :data:`_UNSANDBOXED_CALLER`.
+
+    Accepted risk (owner decision, enterprise smoke test P9): unsandboxed, the
+    candidate runs with the gateway's own rights. It is not denied Crew's secret
+    home or the read-only policy files the sandbox would mask, and ``whoami``
+    gets the probe's allowlisted credential env (``KIRO_API_KEY``). The candidate
+    is the same resolved kiro-cli ACP launches, found on PATH, the user's bin
+    dirs or ``KIROCREW_KIRO_BIN``, so whoever can plant it already runs code as
+    this user. A governed ``sandbox.min_level`` that requires isolation still
+    forbids this path (:func:`_may_probe_login_unsandboxed`).
+
+    Returns the ``--version`` result and the ``whoami`` result, or ``None`` for
+    ``whoami`` when ``--version`` did not answer (so it never ran).
+    """
+    kind, detail, _remedy = sandbox_failure
+    reason = f"sandbox unavailable ({kind}): {detail}"[:200]
+    if not self._login_probe_unsandboxed_warned:
+        # Once per service: the login watch re-probes about once a minute while
+        # the gate is closed, and the SEL events below already record each run.
+        self._login_probe_unsandboxed_warned = True
+        logger.warning(
+            "Kiro login check is running kiro-cli at %s WITHOUT the OS sandbox: %s",
+            executable,
+            reason,
+        )
+    version = await _audited_unsandboxed_probe(
+        self,
+        "probe_version",
+        executable,
+        ("--version",),
+        env=dict(self._probe_environment),
+        timeout_secs=_PROBE_TIMEOUT_SECS,
+        reason=reason,
+    )
+    if not version.ok:
+        return version, None
+    whoami = await _audited_unsandboxed_probe(
+        self,
+        "probe_identity",
+        executable,
+        ("whoami",),
+        env=await _identity_probe_base_env(self),
+        timeout_secs=_IDENTITY_PROBE_TIMEOUT_SECS,
+        reason=reason,
+    )
+    return version, whoami
+
+
+async def _audited_unsandboxed_probe(
+    self: KiroPrerequisiteService,
+    action: str,
+    executable: str,
+    args: tuple[str, ...],
+    *,
+    env: dict[str, str],
+    timeout_secs: float,
+    reason: str,
+) -> ProcessResult:
+    await self._audit(
+        action=action,
+        outcome="invoked",
+        caller=_UNSANDBOXED_CALLER,
+        error=reason,
+        critical=True,
+    )
+    try:
+        result = await self._run_login_unsandboxed(
+            executable, args, env=env, timeout_secs=timeout_secs
+        )
+    except asyncio.CancelledError:
+        await self._set_terminal_audit(action, "failed", _UNSANDBOXED_CALLER, "cancelled")
+        raise
+    except Exception:
+        logger.warning("Unsandboxed Kiro %s probe failed to run", action, exc_info=True)
+        await self._set_terminal_audit(
+            action, "failed", _UNSANDBOXED_CALLER, "probe execution failed"
+        )
+        return ProcessResult(ok=False, error="Kiro CLI probe could not run")
+    await self._set_terminal_audit(
+        action,
+        "completed" if result.ok else "failed",
+        _UNSANDBOXED_CALLER,
+        _terminal_audit_detail(result, result.ok),
+    )
+    return result

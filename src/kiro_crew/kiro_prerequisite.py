@@ -25,6 +25,9 @@ change.
 
 What remains is detection, and detection alone: every subprocess this module
 spawns is one of the two read-only probes above, sandboxed, with a fixed argv.
+The one exception is an enterprise build's login check on a host whose sandbox
+cannot start: those same two fixed probes then run without it, audited, for the
+sign-in verdict only (``_run_login_probe_unsandboxed``).
 No command, argument, URL, or filesystem target is accepted from an HTTP
 request, and the dashboard exposes only a ``status`` read plus the agent-spec
 repair write (which touches Kiro Crew's own files, never the CLI).
@@ -175,15 +178,20 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _PROBE_ERROR_MAX_CHARS,
         _PROBE_TIMEOUT_SECS,
         _TURN_AUTH_MAX_AGE_SECS,
+        _UNSANDBOXED_CALLER,
         _UPDATE_TIMEOUT_SECS,
         _WHOAMI_SIGNED_OUT_MARKER,
         AuditWriter,
         _audited_identity_probe,
         _audited_probe,
+        _audited_unsandboxed_probe,
+        _identity_probe_base_env,
         _latch_login_only,
+        _may_probe_login_unsandboxed,
         _probe,
         _probe_acp_support,
         _probe_failure_text,
+        _probe_login_unsandboxed,
         _run_auth_command,
         _set_terminal_audit,
         _stamp_probe,
@@ -194,6 +202,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         update_cli,
     )
     from kiro_crew.kiro_prerequisite_process import (  # noqa: F401
+        _LOGIN_PROBE_ARGVS,
         _MAX_CAPTURED_OUTPUT,
         _PROCESS_GROUP_SUPERVISOR,
         _PROCESS_GROUP_SUPERVISOR_CODE,
@@ -207,6 +216,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _host_can_reap,
         _note_unsupervised_once,
         _prepare_sandboxed_spawn,
+        _run_login_probe_unsandboxed,
         _run_on_private_loop,
         _run_process,
         _terminate_process,

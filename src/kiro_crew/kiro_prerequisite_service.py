@@ -34,7 +34,11 @@ from kiro_crew.kiro_prerequisite_identity_store import (
     _ensure_auth_staging_parent,
 )
 from kiro_crew.kiro_prerequisite_probe import AuditWriter, _write_audit
-from kiro_crew.kiro_prerequisite_process import ProcessRunner, _run_process
+from kiro_crew.kiro_prerequisite_process import (
+    ProcessRunner,
+    _run_login_probe_unsandboxed,
+    _run_process,
+)
 from kiro_crew.kiro_prerequisite_spawn_identity import identity_component_dropped
 from kiro_crew.kiro_prerequisite_status import (
     PrerequisiteStatus,
@@ -143,6 +147,7 @@ class KiroPrerequisiteService:
     _run_auth_command = _probing._run_auth_command
     _audited_identity_probe = _probing._audited_identity_probe
     _set_terminal_audit = _probing._set_terminal_audit
+    _probe_login_unsandboxed = _probing._probe_login_unsandboxed
 
     def __init__(
         self,
@@ -152,6 +157,7 @@ class KiroPrerequisiteService:
         home: Path | None = None,
         data_home: Path | None = None,
         process_runner: ProcessRunner | None = None,
+        login_probe_runner: ProcessRunner | None = None,
         audit_writer: AuditWriter | None = None,
         clock: Callable[[], float] | None = None,
         spec_lister: Callable[[], list[tuple[str, Path]]] | None = None,
@@ -207,6 +213,10 @@ class KiroPrerequisiteService:
         )
         self._probe_environment: dict[str, str] = {}
         self._run = process_runner or _run_process
+        # The enterprise login check's fixed unsandboxed probe, used only when
+        # the sandbox refused the sandboxed one (``_probe_login_unsandboxed``).
+        self._run_login_unsandboxed = login_probe_runner or _run_login_probe_unsandboxed
+        self._login_probe_unsandboxed_warned = False
         self._audit = audit_writer or _write_audit
         # Injected like the runner and clock above so a test states which specs
         # exist instead of inheriting whatever is in the developer's real agents

@@ -177,6 +177,16 @@ BENIGN_PACKAGE_SPAWNS: frozenset[str] = frozenset(
         # deliberately, so a path resolves in the child to what it resolves to in the
         # parent.
         "subprocess_pool/executor.py::_spawn",
+        # The enterprise login check without the sandbox (owner decision,
+        # enterprise smoke test P9). Runs only when the sandbox itself refused
+        # the sandboxed ``--version`` (the structural ``sandbox_failure``), only in
+        # an enterprise build. The argv is fixed: the gateway-captured
+        # process-group supervisor, then the resolved absolute kiro-cli path the
+        # sandboxed probe was given, then ``--version`` or ``whoami`` -- the function
+        # raises on any other args. No shell, no agent or user value, the probe's
+        # allowlisted env, a timeout that ends the process group, and paired SEL
+        # events with caller ``gateway-status-unsandboxed``.
+        "kiro_prerequisite_process.py::_run_login_probe_unsandboxed",
         # The PDF extractor child: ONE fixed argv, ``sys.executable -P -m
         # kiro_crew.pdf_extract_child --max-chars=N --max-pages=M`` with both
         # numbers module constants of the two callers (file-grep, knowledge

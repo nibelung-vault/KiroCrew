@@ -105,7 +105,7 @@ _BASE_MEMBERS: dict[str, tuple[str, bool, str]] = {
     "__init__": (
         "function",
         False,
-        "(self, *, platform_name: 'str | None' = None, environ: 'MutableMapping[str, str] | None' = None, home: 'Path | None' = None, data_home: 'Path | None' = None, process_runner: 'ProcessRunner | None' = None, audit_writer: 'AuditWriter | None' = None, clock: 'Callable[[], float] | None' = None, spec_lister: 'Callable[[], list[tuple[str, Path]]] | None' = None, assume_ready: 'bool' = False, warm_up_delay: 'float' = 3.0) -> 'None'",
+        "(self, *, platform_name: 'str | None' = None, environ: 'MutableMapping[str, str] | None' = None, home: 'Path | None' = None, data_home: 'Path | None' = None, process_runner: 'ProcessRunner | None' = None, login_probe_runner: 'ProcessRunner | None' = None, audit_writer: 'AuditWriter | None' = None, clock: 'Callable[[], float] | None' = None, spec_lister: 'Callable[[], list[tuple[str, Path]]] | None' = None, assume_ready: 'bool' = False, warm_up_delay: 'float' = 3.0) -> 'None'",
     ),
     "_agent_spec_overlay": (
         "function",
@@ -133,6 +133,11 @@ _BASE_MEMBERS: dict[str, tuple[str, bool, str]] = {
         "(self, *, force: 'bool' = False, login_only: 'bool' = False) -> 'PrerequisiteStatus'",
     ),
     "_probe_acp_support": ("function", True, "(self, executable: 'str') -> 'bool'"),
+    "_probe_login_unsandboxed": (
+        "function",
+        True,
+        "(self, executable: 'str', sandbox_failure: 'tuple[str, str, str]') -> 'tuple[ProcessResult, ProcessResult | None]'",
+    ),
     "_probe_kas_spec_loading": ("function", True, "(self) -> 'tuple[list[str], str]'"),
     "_probe_spec_acceptance": (
         "function",
@@ -202,6 +207,7 @@ _BOUND: dict[str, str] = {
     "_missing_agent_specs": "kiro_crew.kiro_prerequisite_agent_specs",
     "_probe": "kiro_crew.kiro_prerequisite_probe",
     "_probe_acp_support": "kiro_crew.kiro_prerequisite_probe",
+    "_probe_login_unsandboxed": "kiro_crew.kiro_prerequisite_probe",
     "_probe_kas_spec_loading": "kiro_crew.kiro_prerequisite_agent_specs",
     "_probe_spec_acceptance": "kiro_crew.kiro_prerequisite_agent_specs",
     "_repair_agent_specs": "kiro_crew.kiro_prerequisite_agent_specs",

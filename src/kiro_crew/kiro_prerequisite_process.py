@@ -1,7 +1,7 @@
 """Running one fixed kiro-cli argv in the OS sandbox, bounded, and reaping its tree.
 
-:func:`_run_process` is the single spawn this family makes for a probe or an auth call:
-sandbox-wrapped, under the process-group supervisor, with captured output bounded and
+:func:`_run_process` is the single sandboxed spawn this family makes for a probe or an
+auth call: sandbox-wrapped, under the process-group supervisor, with captured output bounded and
 the whole tree terminated on timeout or cancellation (Windows: a retained-handle tree,
 spawned on a private loop). :func:`spawn_supervised_oneshot` is the same supervisor
 for other modules' one-shot ``kiro-cli`` calls. :class:`ProcessResult` is what a run
@@ -451,9 +451,10 @@ async def _run_process(
 ) -> ProcessResult:
     """Run one fixed argv with bounded output, always inside the OS sandbox.
 
-    There is no opt-out: every spawn this module makes is a probe or a Kiro auth
-    call, and all of them are sandboxed. Nothing here may run a child
-    unsandboxed.
+    There is no opt-out: every spawn this function makes is a probe or a Kiro
+    auth call, and all of them are sandboxed. The one unsandboxed spawn in this
+    module is :func:`_run_login_probe_unsandboxed`, the enterprise login check's
+    two fixed probes, which runs only after this function's own sandbox refused.
 
     On Windows this re-enters itself once, on a private event loop owned by a
     pooled worker thread, because the spawn below reaches ``CreateProcess``
@@ -701,4 +702,109 @@ async def _run_process(
         returncode=proc.returncode,
         error=f"process exited with code {proc.returncode}",
         sandbox_failure=sandbox_failure,
+    )
+
+
+#: The only argvs :func:`_run_login_probe_unsandboxed` runs. Read-only, credential-free status probes.
+_LOGIN_PROBE_ARGVS: frozenset[tuple[str, ...]] = frozenset({("--version",), ("whoami",)})
+
+
+async def _run_login_probe_unsandboxed(
+    executable: str,
+    args: tuple[str, ...],
+    *,
+    env: dict[str, str],
+    timeout_secs: float,
+) -> ProcessResult:
+    """Run one fixed login probe WITHOUT the OS sandbox. POSIX only.
+
+    The one exception to :func:`_run_process`'s "always sandboxed" rule, for the
+    enterprise login check alone (``_probe_login_unsandboxed`` in
+    ``kiro_prerequisite_probe``), and only after the sandbox itself refused the
+    sandboxed probe. Owner decision, enterprise smoke test P9: an enterprise
+    build must boot, and its login gate stay open, on a host with no user
+    namespaces (a nested Crew sandbox, a CI container, a hardened host). The argv
+    is fixed (the resolved absolute candidate, then ``--version`` or ``whoami``;
+    anything else raises), there is no shell, the caller passes the probe's
+    allowlisted environment, and the timeout ends the process group.
+
+    Windows never gets here: the prerequisite spawn skips the sandbox wrap
+    there, so its probe is never refused by a sandbox.
+    """
+
+    if args not in _LOGIN_PROBE_ARGVS:
+        raise ValueError(f"not a fixed login probe: {list(args)!r}")
+    if not platform_compat.IS_POSIX:
+        return ProcessResult(ok=False, error="unsandboxed login probe is POSIX only")
+    if not os.path.isabs(executable):
+        return ProcessResult(ok=False, error="unsandboxed login probe needs an absolute path")
+    if not _PROCESS_GROUP_SUPERVISOR_CODE:
+        return ProcessResult(ok=False, error=_PROCESS_GROUP_SUPERVISOR_ERROR)
+    # The gateway-captured supervisor stays outermost, as in ``_run_process``:
+    # it applies the resource limits after exec and leads the process group the
+    # timeout ends. It execs its target without a PATH lookup. With no sandbox
+    # PID namespace to end a credential helper the launcher leaves behind, it
+    # reaps survivors as ``spawn_supervised_oneshot`` does, so ``whoami`` returns
+    # when the CLI does instead of at the timeout.
+    argv = [
+        sys.executable,
+        "-I",
+        "-c",
+        _PROCESS_GROUP_SUPERVISOR_CODE,
+        *resource_limit_supervisor_argv(),
+        *(["--reap-survivors"] if _host_can_reap() else []),
+        executable,
+        *args,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+    except (OSError, RuntimeError) as exc:
+        return ProcessResult(ok=False, error=str(exc))
+
+    output = ""
+
+    async def _capture(stream: asyncio.StreamReader | None) -> None:
+        nonlocal output
+        if stream is None:
+            return
+        while chunk := await stream.read(4096):
+            output = _append_capped(output, chunk.decode("utf-8", "replace"))
+
+    tasks = (
+        asyncio.create_task(_capture(proc.stdout)),
+        asyncio.create_task(_capture(proc.stderr)),
+        asyncio.create_task(proc.wait()),
+    )
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout_secs)
+    except BaseException as exc:
+        await _terminate_process(proc)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if isinstance(exc, asyncio.TimeoutError):
+            return ProcessResult(
+                ok=False,
+                output=output,
+                returncode=proc.returncode,
+                timed_out=True,
+                error="process timed out",
+            )
+        if isinstance(exc, Exception):
+            return ProcessResult(ok=False, output=output, error=str(exc))
+        raise
+    if proc.returncode == 0:
+        return ProcessResult(ok=True, output=output, returncode=0)
+    return ProcessResult(
+        ok=False,
+        output=output,
+        returncode=proc.returncode,
+        error=f"process exited with code {proc.returncode}",
     )
