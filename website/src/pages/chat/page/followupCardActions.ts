@@ -27,10 +27,11 @@ export function useFollowupCardActions({
   dispatch, moveSlotToFolder, activeSlot, folderSuggestion, followupTsBySlot, inputRef,
 }: FollowupCardActionsOptions) {
   // ── Follow-up card actions (suggest_followup MCP tool) ───────────────────
-  // Both routes PRE-FILL a composer and stop; neither sends. `setPendingInput`
-  // is consumed by usePendingInputIntake (called from ChatPage), which drops the text into the composer and
-  // flags the prefill hint — the same path the Projects page and command
-  // palette use, so there is one prefill mechanism, not a parallel one.
+  // "Add to this session" PRE-FILLS this composer and sends nothing (the Start
+  // routes, in useFollowupStarts, send). `setPendingInput` is consumed by
+  // usePendingInputIntake (called from ChatPage), which drops the text into the
+  // composer and flags the prefill hint — the same path the Projects page and
+  // command palette use, so there is one prefill mechanism, not a parallel one.
   //
   // Live per-slot card timestamps, read inside async actions without making them
   // depend on (and re-create on) every card change.
@@ -92,7 +93,7 @@ interface FollowupStartsOptions {
   currentSlot: ChatSlot | undefined
   followupTsRef: MutableRefObject<Record<string, { items: FollowupItem[]; ts: number; }>>
   followupBranchFor: (item: FollowupItem) => string
-  openFollowupSession: (item: FollowupItem, target: { project?: string; folderId?: string | null; originSlot: string | null; originTs: number | undefined; fail: { notCreated: string; noSession: string; notOpened: string; notFocused: string; }; }) => Promise<void>
+  openFollowupSession: (item: FollowupItem, target: { project?: string; folderId?: string | null; originSlot: string | null; originTs: number | undefined; fail: { notCreated: string; noSession: string; notSent: string; notOpened: string; notFocused: string; }; }) => Promise<void>
 }
 
 /**
@@ -131,13 +132,16 @@ export function useFollowupStarts({
     if (!path) throw new Error(res?.error || i18nT('pages.chatPage.worktree_creation_returned_no_path'))
     // The worktree exists from here on, so every failure names its path: the
     // create endpoint is idempotent for its own destination, so pressing the
-    // button again reuses this worktree instead of refusing it.
+    // button again reuses this worktree instead of refusing it. The not-opened
+    // and not-focused messages arrive after the prompt was sent, so they point
+    // at the sidebar instead of a retry.
     await openFollowupSession(item, {
       ...origin,
       project: path,
       fail: {
         notCreated: i18nT('pages.chatPage.followup_worktree_session_not_created', { path }),
         noSession: i18nT('pages.chatPage.followup_worktree_no_session_returned', { path }),
+        notSent: i18nT('pages.chatPage.followup_worktree_prompt_not_sent', { path }),
         notOpened: i18nT('pages.chatPage.followup_worktree_session_not_opened', { path }),
         notFocused: i18nT('pages.chatPage.followup_worktree_session_not_focused', { path }),
       },
@@ -147,8 +151,9 @@ export function useFollowupStarts({
   // The route for a session that has no repository to branch: a plain new chat
   // in the spawning session's project directory (where a new chat starts by
   // default when it has none), with no git call at all. Pressing the button
-  // again after a failure opens another chat, so the not-opened and
-  // not-focused messages point at the sidebar instead of a retry.
+  // again after a failure opens another chat. The not-opened and not-focused
+  // messages arrive after the prompt was sent, so they point at the sidebar
+  // instead of a retry.
   const followupStartInNewChat = useCallback(async (item: FollowupItem) => {
     await openFollowupSession(item, {
       ...followupOrigin(),
@@ -156,6 +161,7 @@ export function useFollowupStarts({
       fail: {
         notCreated: i18nT('pages.chatPage.followup_chat_not_created'),
         noSession: i18nT('pages.chatPage.followup_chat_not_created'),
+        notSent: i18nT('pages.chatPage.followup_chat_prompt_not_sent'),
         notOpened: i18nT('pages.chatPage.followup_chat_not_focused'),
         notFocused: i18nT('pages.chatPage.followup_chat_not_focused'),
       },

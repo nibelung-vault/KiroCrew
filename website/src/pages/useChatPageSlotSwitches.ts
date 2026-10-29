@@ -3,11 +3,11 @@ import { useCallback, useEffect, useRef, type MutableRefObject, type Dispatch, t
 import { useQuery } from '@tanstack/react-query'
 import { store, type AppDispatch, type AppStore } from '../store'
 import type { ErrorReport } from '../utils/errorReport'
-import { captureForkOrigin, forkMayOpen, forkOpenSettled, forkOpenStarted, forkSlot, switchSlot, createSlot, type FollowupItem, setPendingInput, clearFollowupCard, openActivityToTab, requestSlotFolderOpen } from '../store/chatSlice'
+import { captureForkOrigin, forkMayOpen, forkOpenSettled, forkOpenStarted, forkSlot, switchSlot, createSlot, type FollowupItem, clearFollowupCard, openActivityToTab, requestSlotFolderOpen } from '../store/chatSlice'
 import { api } from '../api/client'
 import { safeSetSessionItem } from '../utils/safeStorage'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
-import { PREFILL_STORAGE_KEY, writePrefill } from '../utils/navIntent'
+import { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { errMessage } from '../utils/thunkError'
 import { showTranscriptForkFailure } from '../utils/forkFailure'
 import { i18nT } from '../i18n/t'
@@ -232,23 +232,25 @@ export function useSignedLinkAnchor({
 interface OpenFollowupSessionOptions {
   mode?: string
   dispatch: AppDispatch
+  /** The composer's send path (useComposerSend). */
+  send: (optionText?: string, targetSlot?: string, steerNow?: boolean, isolated?: boolean, ownsFailureReport?: boolean) => Promise<boolean>
+  setActionError: Dispatch<SetStateAction<{ title?: string; message: string; preserveOnSwitch?: boolean } | null>>
 }
 
 /**
- * A follow-up card's "start elsewhere" target: creates (or reuses) the session the follow-up
- * runs in and switches to it with the follow-up pre-filled.
+ * A follow-up card's "start elsewhere" target: creates the session the follow-up
+ * runs in, sends it the follow-up's prompt as its first message, and switches to it.
  *
  * Called from ChatPage at the position its statements held, so React registers its effects in the same order.
  */
 export function useOpenFollowupSession({
-  mode, dispatch,
+  mode, dispatch, send, setActionError,
 }: OpenFollowupSessionOptions) {
   // The post-create half both spawn routes share: open a session (scoped to
-  // `project` when there is one), hand it the prompt, take the user to it, and
-  // only then clear the card. Every step fails CLOSED with the caller's message
-  // for that step, so a route can name what it already left behind (the
-  // worktree route names the reusable worktree) and no failure ever prefills
-  // an unrelated conversation.
+  // `project` when there is one), send it the prompt, clear the card, and take
+  // the user to the session. Every step before the send fails CLOSED with the
+  // caller's message for that step and keeps the card, so a route can name what
+  // it already left behind (the worktree route names the reusable worktree).
   const openFollowupSession = useCallback(async (
     item: FollowupItem,
     target: {
@@ -256,10 +258,14 @@ export function useOpenFollowupSession({
       folderId?: string | null
       originSlot: string | null
       originTs: number | undefined
-      fail: { notCreated: string; noSession: string; notOpened: string; notFocused: string }
+      fail: { notCreated: string; noSession: string; notSent: string; notOpened: string; notFocused: string }
     },
   ) => {
     const { project, folderId, originSlot, originTs, fail } = target
+    // The session on screen when Start was pressed. The create and the send are
+    // awaited, and a user who opens another session meanwhile has chosen where to
+    // be: the finished start must not pull them away from it.
+    const startedOn = store.getState().chat.activeSlot
     let slotKey = ''
     try {
       // `activate: false` on purpose: the slot must be SCOPED to its directory
@@ -273,44 +279,50 @@ export function useOpenFollowupSession({
     } catch {
       throw new Error(fail.notCreated)
     }
-    // A fulfilled thunk with no key would skip every guard below (scoping,
-    // activation, focus verification) and prefill whatever session is on screen
-    // — the exact fail-open the docs promise not to do. Fail closed instead.
+    // A fulfilled thunk with no key would leave nothing to send to. Fail closed
+    // rather than let an empty target fall through to the session on screen.
     if (!slotKey) throw new Error(fail.noSession)
     // Scoping is NOT done here: `createSlot({ activate: false })` awaits the
     // project assignment before it publishes the slot, and deletes the session if
-    // that fails, so the slot is never reachable in an unscoped state. A failure
-    // therefore rejects the thunk and is reported by the catch above.
-    // createSlot's fulfilled reducer deliberately does NOT activate its result
-    // if the user switched sessions while the create was in flight. The
-    // prefill below writes to the *active* composer, so without this the
-    // prompt would land in whatever unrelated session is on screen and the new
-    // session would open empty. The user asked for this session by clicking;
-    // take them to it — and if that fails, surface the error and keep the card
-    // rather than prefilling the wrong conversation.
+    // that fails, so the slot is never reachable in an unscoped state and the
+    // turn below runs in the follow-up's own directory. A failure rejects the
+    // thunk and is reported by the catch above.
+    //
+    // Send BEFORE the switch, addressed to the new slot by key, while the card is
+    // still on screen: a refused send then reports on the card item it came from.
+    // `isolated` sends the prompt verbatim and leaves every composer alone (the
+    // origin's draft, files and quote are not this turn's), the same mode an app
+    // launch uses. Resolves false only when nothing was delivered; the card
+    // item owns that report, so the send posts no page notice of its own.
+    const delivered = await send(item.prompt, slotKey, undefined, true, true)
+    if (!delivered) throw new Error(fail.notSent)
+    // The prompt is running from here on, so the card goes now: left up, its
+    // Start button would run the same prompt a second time in yet another
+    // session. Cleared by the ts the card rendered with, so a newer card that
+    // landed while the start was in flight is left alone.
+    if (originSlot) dispatch(clearFollowupCard({ slot: originSlot, ts: originTs }))
+    // Take the user to the session they started. The card is gone, so a failure
+    // here is a page-level notice that points at the sidebar, never a retry. It
+    // survives a slot switch: the not-focused case means the user (or another
+    // switch) already moved the page somewhere else.
     // Read the store directly, NOT activeSlotRef: the ref is refreshed by a
-    // render, and `unwrap()` resolves as soon as the reducer ran — so a stale
-    // ref would report a failure (and skip the prefill) on a switch that in
-    // fact succeeded. store.getState() sees the committed value immediately.
-    // Hand the prompt over through PREFILL_STORAGE_KEY *before* the switch — the
-    // same channel the ?sid / popout paths use. `setPendingInput` alone loses the
-    // race: its consuming effect is declared BEFORE the per-slot draft-restore
-    // effect, so when the switch and the prefill land in one React commit the
-    // restore runs last and overwrites the composer with the incoming slot's
-    // (empty) draft, and the prompt vanishes. Seeding the prefill makes the
-    // restore itself apply the prompt, so there is nothing left to race.
-    writePrefill(slotKey, item.prompt)
-    if (store.getState().chat.activeSlot !== slotKey) {
+    // render, and `unwrap()` resolves as soon as the reducer ran, so a stale ref
+    // would report a failure on a switch that in fact succeeded.
+    const nowOn = store.getState().chat.activeSlot
+    if (nowOn !== slotKey && nowOn !== startedOn) {
+      setActionError({ message: fail.notFocused, preserveOnSwitch: true })
+      return
+    }
+    if (nowOn !== slotKey) {
       try {
         await dispatch(switchSlot(slotKey)).unwrap()
       } catch {
-        throw new Error(fail.notOpened)
+        setActionError({ message: fail.notOpened, preserveOnSwitch: true })
+        return
       }
     }
-    if (store.getState().chat.activeSlot !== slotKey) throw new Error(fail.notFocused)
-    dispatch(setPendingInput(item.prompt))
-    if (originSlot) dispatch(clearFollowupCard({ slot: originSlot, ts: originTs }))
-  }, [dispatch, mode])
+    if (store.getState().chat.activeSlot !== slotKey) setActionError({ message: fail.notFocused, preserveOnSwitch: true })
+  }, [dispatch, mode, send, setActionError])
   return {
     openFollowupSession,
   }

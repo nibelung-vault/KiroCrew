@@ -724,7 +724,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const {
     openFollowupSession,
   } = useOpenFollowupSession({
-    mode, dispatch,
+    mode, dispatch, send, setActionError,
   })
   const {
     followupStartInWorktree, followupStartInNewChat,
