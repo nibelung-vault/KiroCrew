@@ -802,6 +802,9 @@ async def _run_inner_impl(
                 # a routed tier), and the effort.
                 pinned_model=info.model,
                 reasoning_effort=info.reasoning_effort,
+                # The lineage depth a continuation after a restart carries
+                # back into admission, so it cannot restart the count.
+                depth=info.depth,
             )
             if _wrote:
                 break
